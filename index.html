@@ -998,7 +998,7 @@ async function loadSource(file){
 }
 function recompute(){const R=S.run;const p=S.profiles.find(x=>x.id===R.pid);if(!p||!R.src){R.res=null;return}
   R.res=p.kind==="kpi"?C.computeKpi(p,R.src,R.ym,R.manual,R.handlers):C.computeRows(p,R.src,R.ym)}
-function selectInsurer(id){const R=S.run;if(R.pid!==id){R.pid=id;R.src=null;R.res=null;R.file="";R.prev=null;R.prevName="";R.remarks=[];R.note="";
+function selectInsurer(id){const R=S.run;if(R.pid!==id){R.pid=id;R.src=null;R.res=null;R.file="";R.prev=null;R.prevName="";R.remarks=[];R.note="";R.ackBlank=false;
   const p=S.profiles.find(x=>x.id===id);R.manual={};R.handlers="";
   if(p&&p.kind==="kpi"){R.handlers=p.handlers||"";(p.columns||[]).forEach((c,i)=>{if(c.remember&&p.manualLast&&p.manualLast[c.letter]!=null)R.manual[i]=p.manualLast[c.letter]})}}
   render()}
@@ -1109,12 +1109,14 @@ function kpiReview(p){
       ${res.flags.map(f=>`<tr class="flagrow ${f.level}"><td class="num">${esc(f.row)}</td><td class="mono">${esc(f.key)}</td><td style="white-space:normal">${esc(f.issue)}</td><td><span class="pill ${f.level}">${f.level==="bad"?"Fix":"Check"}</span>${f.col!=null&&f.level==="warn"?` <button class="btn ghost" data-addrem="${f.col}" style="padding:2px 6px;font-size:12px">${S.run.remarks.some(r=>r.col===f.col)?"Remark added":"Add remark"}</button>`:""}</td></tr>`).join("")}
       </tbody></table></div>`:`<div class="notice info"><span class="pill ok">No flags</span><span>Dates and statuses are consistent and every SLA figure is within target.</span></div>`}
     ${!blocked?refPanel(res):""}
-    ${blanks.length?`<details><summary>${blanks.length} field${blanks.length>1?"s":""} will be left blank</summary><p class="small muted" style="margin-top:8px">${blanks.map(c=>`<span class="mono">${c.letter}</span> ${esc(c.header)}`).join(" · ")}</p></details>`:""}
+    ${blanks.length?`<div class="notice warn" style="flex-direction:column;gap:8px"><span><b>${blanks.length} field${blanks.length>1?"s are":" is"} still empty.</b> The HWA export has no data for these — type the figure in step 4, or leave it empty if there is no data or it does not apply (${esc(shortName(p))} asks for blanks in that case).</span>
+      <div class="chips">${blanks.map(c=>`<button class="chip" data-goto="${p.columns.indexOf(c)}" style="font-size:12px;padding:4px 10px"><span class="mono">${c.letter}</span> ${esc(c.header.length>40?c.header.slice(0,38)+"…":c.header)}</button>`).join("")}</div></div>`:""}
   </div></div></section>
   ${remarksPanel(p,res)}
   <section class="panel"><div class="step"><div class="step-n">7</div><div class="step-body">
     <h2>Download</h2>
-    <div class="row"><button class="btn" id="dlK" ${blocked?"disabled":""}>${ICON.xls} KPI report (.xlsx)</button><button class="btn sec" id="dlKP" ${blocked?"disabled":""}>${ICON.pdf} PDF copy for our file</button>
+    ${!blocked&&blanks.length?`<label class="row small" style="gap:8px"><input type="checkbox" id="ackBlank" ${S.run.ackBlank?"checked":""}> I have checked the ${blanks.length} empty field${blanks.length>1?"s":""} — leave ${blanks.length>1?"them":"it"} blank</label>`:""}
+    <div class="row"><button class="btn" id="dlK" ${blocked||(blanks.length&&!S.run.ackBlank)?"disabled":""}>${ICON.xls} KPI report (.xlsx)</button><button class="btn sec" id="dlKP" ${blocked?"disabled":""}>${ICON.pdf} PDF copy for our file</button>
       ${bad&&!blocked?`<span class="pill bad">${bad} to fix</span>`:""}</div>
     <p class="hint">Only the data cells of one row are written; headings, column order and the other sheets stay exactly as ${esc(shortName(p))} sent them.</p>
     ${coverEmail(p,res)}
@@ -1173,7 +1175,7 @@ function bindKpiRun(p){
   const dz=$("#drop");if(dz){dz.ondragover=e=>{e.preventDefault();dz.classList.add("over")};dz.ondragleave=()=>dz.classList.remove("over");dz.ondrop=e=>{e.preventDefault();dz.classList.remove("over");const f=e.dataTransfer.files[0];f&&loadSource(f)}}
   document.querySelectorAll('label[for]').forEach(l=>l.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();$("#"+l.htmlFor).click()}});
   $("#clearFile")&&($("#clearFile").onclick=()=>{R.src=null;R.res=null;R.file="";render()});
-  $("#ym").onchange=e=>{if(e.target.value){R.ym=e.target.value;recompute();render()}};
+  $("#ym").onchange=e=>{if(e.target.value){R.ym=e.target.value;R.ackBlank=false;recompute();render()}};
   let tm=null;const refresh=()=>{clearTimeout(tm);recompute();const a=document.activeElement&&document.activeElement.id;$("#kpiReview").innerHTML=kpiReview(p);bindKpiDl(p);if(a&&$("#"+a))$("#"+a).focus()};
   const later=()=>{clearTimeout(tm);tm=setTimeout(refresh,350)};
   $("#handlers").oninput=e=>{R.handlers=e.target.value;later()};
@@ -1184,7 +1186,9 @@ function bindKpiRun(p){
   $("#clearPrev")&&($("#clearPrev").onclick=()=>{R.prev=null;R.prevName="";render()});
   bindKpiDl(p);
 }
-function bindKpiDl(p){$("#dlK")&&($("#dlK").onclick=()=>downloadKpi(p));$("#dlKP")&&($("#dlKP").onclick=()=>kpiPdf(p));if(S.run.res)bindRemarks(p)}
+function bindKpiDl(p){
+  document.querySelectorAll("[data-goto]").forEach(b=>b.onclick=()=>{const el=document.querySelector(`[data-man="${b.dataset.goto}"]`);if(el){el.scrollIntoView({behavior:"smooth",block:"center"});setTimeout(()=>el.focus(),350)}});
+  $("#ackBlank")&&($("#ackBlank").onchange=e=>{S.run.ackBlank=e.target.checked;const d=$("#dlK");if(d)d.disabled=!e.target.checked});$("#dlK")&&($("#dlK").onclick=()=>downloadKpi(p));$("#dlKP")&&($("#dlKP").onclick=()=>kpiPdf(p));if(S.run.res)bindRemarks(p)}
 function kpiBase(p){return `HWA_${(p.code||p.name).replace(/[^A-Za-z0-9]+/g,"-")}_DCA_KPI_${S.run.ym}`}
 async function logKpi(p,kind){
   const R=S.run,res=R.res;p.manualLast=p.manualLast||{};p.columns.forEach((c,i)=>{if(c.remember&&R.manual[i]!=null)p.manualLast[c.letter]=R.manual[i]});p.handlers=R.handlers;p.lastRun=Date.now();await saveProfiles();
