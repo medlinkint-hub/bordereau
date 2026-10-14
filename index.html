@@ -3,7 +3,7 @@
 <title>HWA Bordereau Builder</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap">
 <style>
 /* Layout: fixed navy rail (desktop) / top tab bar (phone) + one working column; the run screen is a real 5-step sequence */
 :root{
@@ -161,6 +161,35 @@ details summary{cursor:pointer;font-weight:600;color:var(--primary)}
   .main{padding-block:20px 60px}
 }
 @media (prefers-reduced-motion:no-preference){.btn,.chip,.navbtn{transition:background .15s,filter .15s}}
+
+/* ---- stronger type ---- */
+body{font-weight:500}
+h1{font-size:26px;font-weight:800;letter-spacing:-.02em;color:var(--primary)}
+:root[data-theme="dark"] h1{color:var(--ink)}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) h1{color:var(--ink)}}
+h2{font-size:17px;font-weight:800;letter-spacing:-.01em}
+h3{font-weight:800}
+.pagehead p{font-size:15px;color:var(--ink);opacity:.8}
+.muted{font-weight:500}
+label.f{font-weight:700;color:var(--ink);font-size:13px}
+label.f span[style*="font-weight:400"]{font-weight:500!important;color:var(--muted)}
+input[type=text],input[type=password],input[type=month],input[type=number],input[type=email],select,textarea{font-weight:600}
+.btn{font-weight:700;letter-spacing:.01em}
+.chip{font-weight:700}
+.navbtn{font-weight:600}
+.navbtn[aria-current="page"]{font-weight:800}
+.brand-word{font-weight:800}
+.step-n{font-weight:800;font-size:14px;width:30px;height:30px}
+.stat .k{font-weight:800;color:var(--ink);opacity:.75}
+.stat .v{font-size:24px;font-weight:800;letter-spacing:-.01em}
+.pill{font-weight:800}
+th{font-weight:800;color:var(--ink)}
+td{font-weight:500}
+.notice b,.notice strong{font-weight:800}
+.hint{font-weight:500;color:var(--ink);opacity:.75}
+details summary{font-weight:800}
+.card h3{font-size:16px}
+.map .col{font-weight:700;color:var(--primary)}
 </style>
 
 <div id="root"></div>
@@ -1062,7 +1091,7 @@ function kpiRunView(p){
   const manualCols=p.columns.map((c,i)=>[c,i]).filter(([c])=>c.mode==="manual");
   const groups=[];manualCols.forEach(([c,i])=>{let g=groups.find(x=>x.name===(c.group||""));if(!g){g={name:c.group||"",items:[]};groups.push(g)}g.items.push([c,i])});
   return`<div class="pagehead"><div><h1>Monthly KPI report</h1><p class="muted">${esc(shortName(p))} wants one row per month in their own template. Counts come from the case export; SLA figures you type in.</p></div>
-    ${p.dueDay?(()=>{const[y,m]=R.ym.split("-").map(Number);const late=new Date()>new Date(y,m,p.dueDay,23,59);return`<span class="pill ${late?"bad":"neutral"}">${late?"Overdue — was ":""}${esc(dueText(p,R.ym))}</span>`})():""}</div>
+    ${p.dueDay?(()=>{const[y,m]=R.ym.split("-").map(Number);const late=new Date()>new Date(y,m,p.dueDay,23,59);return`<span class="pill ${late?"bad":"neutral"}">${late?"Overdue — ":""}${esc(late?dueText(p,R.ym).replace("Due","was due"):dueText(p,R.ym))}</span>`})():""}</div>
   <section class="panel"><div class="step done"><div class="step-n">1</div><div class="step-body"><h2>Insurance company</h2>${chips}</div></div></section>
   <section class="panel"><div class="step ${R.src?"done":""}"><div class="step-n">2</div><div class="step-body">
     <h2>Case export for ${esc(p.name)}</h2>
@@ -1083,7 +1112,7 @@ function kpiRunView(p){
   <section class="panel"><div class="step"><div class="step-n">4</div><div class="step-body">
     <h2>SLA figures for ${esc(C.periodLabel(R.ym))}</h2>
     <p class="hint">Type percentages as 98 or 98%. Leave a field empty when it does not apply or there is no data; ${esc(shortName(p))} asks for blanks, not zeros, in that case.</p>
-    ${groups.map(g=>`<div style="display:flex;flex-direction:column;gap:10px"><h3 style="color:var(--muted);text-transform:uppercase;font-size:11.5px;letter-spacing:.06em">${esc(g.name)}</h3>
+    ${groups.map(g=>`<div style="display:flex;flex-direction:column;gap:10px"><h3 style="color:var(--primary);text-transform:uppercase;font-size:12.5px;font-weight:800;letter-spacing:.08em;border-bottom:2px solid var(--accent);padding-bottom:4px;align-self:flex-start">${esc(g.name)}</h3>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px 16px">${g.items.map(([c,i])=>`<label class="f"><span><span class="mono" style="color:var(--muted)">${c.letter}</span> ${esc(c.header)}</span>
         ${manInput(c,i)}
         ${c.hint?`<span class="small" style="font-weight:400">${esc(c.hint)}</span>`:""}
