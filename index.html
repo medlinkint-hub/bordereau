@@ -566,6 +566,8 @@ var CORE = (function(){
     if(/^(no|number of|total)?\s*closed claims$/.test(hh))return{mode:"metric",metric:"closed_claims",fmt:"count"};
     if(/notification to closure|fnol to clos/.test(hh))return{mode:"metric",metric:"avg_notif_close",fmt:"days"};
     if(/handler/.test(hh))return{mode:"metric",metric:/new files/.test(t)?"new_per_handler":"open_per_handler",fmt:"number"};
+    if(/indemnity/.test(hh)&&/reserve/.test(hh)&&/\bmean\b/.test(hh))return{mode:"manual",fmt:"number",suggest:"var_mean"};
+    if(/indemnity/.test(hh)&&/reserve/.test(hh)&&/\bsd\b|standard deviation/.test(hh))return{mode:"manual",fmt:"number",suggest:"var_sd"};
     if(/walkaway/.test(t))return{mode:"manual",fmt:"count",suggest:"walkaway_est"};
     if(/declined/.test(t))return{mode:"manual",fmt:"count",suggest:"declined_est"};
     if(/static/.test(t))return{mode:"manual",fmt:"percent",suggest:"static_pct"};
@@ -602,8 +604,8 @@ var CORE = (function(){
     static_pct:{label:"Est. static claims: open at month end older than the static limit ÷ open",fmt:"percent",proxy:true},
     nilres_pct:{label:"Est. nil-reserve claims: open, nil initial amount, older than the nil limit ÷ open",fmt:"percent",proxy:true},
     reopened_ratio:{label:"Reopened files at month end ÷ claims closed in month",fmt:"percent",proxy:true},
-    var_mean:{label:"Est. variance initial → final amount, closed in month (mean, EUR)",fmt:"number",proxy:true},
-    var_sd:{label:"Est. variance initial → final amount, closed in month (SD, EUR)",fmt:"number",proxy:true},
+    var_mean:{label:"Reserve variance: final incurred − initial reserve, claims closed in month (mean, EUR)",fmt:"number",proxy:true},
+    var_sd:{label:"Reserve variance: final incurred − initial reserve, claims closed in month (SD, EUR)",fmt:"number",proxy:true},
     audit_pct:{label:"Files with Audit flag ÷ open + closed in last 12 months",fmt:"percent",proxy:true}
   };
   const isTrue=v=>/^(αληθές|αληθης|true|yes|ναι|y|1|x)$/i.test(String(v==null?"":v).trim());
@@ -646,7 +648,7 @@ var CORE = (function(){
       const closedIn=c&&c>=from&&c<=to;
       if(closedIn&&has(K.authorized)&&!isTrue(r[K.authorized]))flags.push({row:r._r,key,level:"warn",issue:`Closed in ${periodLabel(ym)} but "${K.authorized}" is not ticked`});
       if(closedIn&&has(K.audit)&&!isTrue(r[K.audit]))flags.push({row:r._r,key,level:"warn",issue:`Closed in ${periodLabel(ym)} but "${K.audit}" is not ticked`});
-      cases.push({key,n,c,st,stl,paid,init,audit:has(K.audit)?isTrue(r[K.audit]):null,benefit:has(K.benefit)?String(r[K.benefit]).trim():"",r:r._r});
+      cases.push({key,n,c,st,stl,paid,init,exc,initNet:init==null?null:init-(K.netExcess===false?0:exc),audit:has(K.audit)?isTrue(r[K.audit]):null,benefit:has(K.benefit)?String(r[K.benefit]).trim():"",r:r._r});
     });
     if(skipped)info.push(`${skipped} row${skipped>1?"s":""} without ${K.key} ignored (export total line).`);
     if(other)info.push(`${other} row${other>1?"s":""} for another client left out.`);
@@ -661,12 +663,12 @@ var CORE = (function(){
       open_per_handler:h?Math.round(openC.length/h*100)/100:null,new_per_handler:h?Math.round(newC.length/h*100)/100:null,
       closed_nil:has(K.paid)?closedC.filter(x=>(x.paid||0)===0).length:null,_cases:cases.length};
     const age=x=>Math.round((to-x.n)/864e5);const staticD=+K.staticDays||90,nilD=+K.nilDays||60;
-    const staticC=openC.filter(x=>age(x)>staticD);const nilC=openC.filter(x=>(x.init||0)===0&&age(x)>nilD);
+    const staticC=openC.filter(x=>age(x)>staticD);const nilC=openC.filter(x=>(x.initNet||0)<=0&&age(x)>nilD);
     if(has(K.paid)&&has(K.initial)){stats.walkaway_est=closedC.filter(x=>(x.paid||0)===0&&(x.init||0)===0).length;stats.declined_est=closedC.filter(x=>(x.paid||0)===0&&(x.init||0)>0).length}
     stats.static_pct=openC.length?Math.round(staticC.length/openC.length*10000)/10000:0;
     stats.nilres_pct=has(K.initial)?(openC.length?Math.round(nilC.length/openC.length*10000)/10000:0):null;
     const reo=openC.filter(x=>reopenSet.includes(x.stl)).length;stats.reopened_ratio=closedC.length?Math.round(reo/closedC.length*10000)/10000:(reo?1:0);stats.reopened=reo;
-    if(has(K.paid)&&has(K.initial)&&closedC.length){const d=closedC.map(x=>(x.paid||0)-(x.init||0));const mean=d.reduce((a,b)=>a+b,0)/d.length;
+    if(has(K.paid)&&has(K.initial)&&closedC.length){const d=closedC.map(x=>(x.paid||0)-(x.initNet||0));const mean=d.reduce((a,b)=>a+b,0)/d.length;
       stats.var_mean=Math.round(mean*100)/100;stats.var_sd=Math.round(Math.sqrt(d.reduce((a,b)=>a+(b-mean)**2,0)/d.length)*100)/100}
     if(has(K.audit)){const y12=new Date(to.getFullYear()-1,to.getMonth(),to.getDate()+1);const pool=cases.filter(x=>(x.n<=to&&(!x.c||x.c>to))||(x.c&&x.c>=y12&&x.c<=to));
       stats.audit_pct=pool.length?Math.round(pool.filter(x=>x.audit).length/pool.length*10000)/10000:null}
@@ -674,7 +676,10 @@ var CORE = (function(){
     const byBenefit={};newC.forEach(x=>{const b=x.benefit||"(no benefit)";byBenefit[b]=(byBenefit[b]||0)+1});
     const ageBands={"0–30 days":0,"31–90 days":0,"91–180 days":0,"Over 180 days":0};openC.forEach(x=>{const a=age(x);ageBands[a<=30?"0–30 days":a<=90?"31–90 days":a<=180?"91–180 days":"Over 180 days"]++});
     stats._openAll=openAll.length;stats._openNew=openNew.length;stats._byBenefit=byBenefit;stats._ageBands=ageBands;stats._staticDays=staticD;stats._nilDays=nilD;
-    const paidSum=closedC.reduce((a,x)=>a+(x.paid||0),0),initSum=closedC.reduce((a,x)=>a+(x.init||0),0);stats._paidClosed=Math.round(paidSum*100)/100;stats._initClosed=Math.round(initSum*100)/100;
+    const r2=v=>Math.round(v*100)/100;const sum=(a,f)=>r2(a.reduce((t,x)=>t+(f(x)||0),0));
+    stats._paidClosed=sum(closedC,x=>x.paid);stats._initClosed=sum(closedC,x=>x.init);stats._excClosed=sum(closedC,x=>x.exc);stats._savClosed=r2(stats._initClosed-stats._excClosed-stats._paidClosed);
+    /* reserve still open at month end: current reserve for files still open today, initial reserve for files closed after month end */
+    stats._outstanding=sum(openC,x=>(x.c?x.initNet:x.paid));stats._reserveNew=sum(newC,x=>x.initNet);
     const suggested={};
     const values=(profile.columns||[]).map((s,i)=>{
       switch(s.mode){
@@ -733,8 +738,8 @@ var CORE = (function(){
       M:{mode:"manual",fmt:"count",suggest:"walkaway_est",hint:"Suggested: closed in month with nothing claimed and nothing paid — confirm"},N:N("Vulnerable customers in the claims process"),
       O:{mode:"blank",fmt:"text",hint:"Heading only — Sompo's example leaves it empty"},
       P:P("Target 95% within 3 working days",{min:.95}),Q:P("Target 100% within 5 working days",{min:1}),
-      R:{mode:"manual",fmt:"number",hint:"Mean, claims closed in month. The export has no reserve history; the initial-claimed → final figure is shown below for reference only"},S:{mode:"manual",fmt:"number",hint:"Standard deviation — see reference figure below"},
-      T:{mode:"manual",fmt:"number",hint:"Mean — fee reserve"},U:{mode:"manual",fmt:"number",hint:"Standard deviation — fee reserve"},
+      R:{mode:"manual",fmt:"number",suggest:"var_mean",hint:"Suggested from HWA data: final paid − initial reserve (initial charge − excess), claims closed in month, mean in EUR"},S:{mode:"manual",fmt:"number",suggest:"var_sd",hint:"Suggested from HWA data: standard deviation of the same, in EUR"},
+      T:{mode:"manual",fmt:"number",hint:"Fee reserve — the HWA export has no fee amounts; leave blank or type in"},U:{mode:"manual",fmt:"number",hint:"Fee reserve — no fee amounts in the export"},
       V:N("Complaints notified to Sompo (target: within 1 working day)"),W:N("Claims complaints received"),X:{mode:"manual",fmt:"count",suggest:"declined_est",hint:"Suggested: closed in month, amount claimed but nil paid — confirm"},Y:N("Compliments received"),Z:N("Vulnerable customers in complaints"),AA:N("Complaints resolved within authority"),
       AB:{mode:"blank",fmt:"text",hint:"Heading only"},
       AC:P("Target 100%",{min:1}),AD:P("Target 100%",{min:1}),AE:P("Target 0%",{max:0}),AF:Object.assign(P("Suggested: open over 90 days ÷ open (A&H rule; no payment-movement dates in export) — target under 25%",{max:.25}),{suggest:"static_pct"}),AG:Object.assign(P("Suggested: open, nil amount, over 60 days ÷ open — target under 25%",{max:.25}),{suggest:"nilres_pct"}),AH:P("Target 0% outside panel",{max:0}),AI:Object.assign(P("Suggested: reopened files ÷ closed in month. Green under 15% · Amber 15–25% · Red over 25%",{max:.15}),{suggest:"reopened_ratio"}),
@@ -749,7 +754,7 @@ var CORE = (function(){
       kpi:{notif:"Notification Date",closed:"Closed Date",status:"Claim Status",key:"HWA-ID",paid:"FinalAmountGOPEURO",initial:"InitalChargeTotalEuro",excess:"ExcessEuro",saving:"TotalSavingEuro",audit:"Audit",authorized:"Authorized",benefit:"Benefit",
         clientField:"UnderWriter",clientValue:"SOMPO",openValues:"Open,ReOpened",closedValues:"Closed",reopenValues:"ReOpened",staticDays:90,nilDays:60,lob:"A&H",openBasis:"all"},
       sourceFields:["Claimant Full Name","HWA-ID","Notification Date","Closed Date","Incident Date","Reference Num","InitalChargeTotalEuro","ExcessEuro","TotalSavingEuro","FinalAmountGOPEURO","Policy Number","Client Insurance","Assistance","Client","Benefit","Claim Status","Travel Check","Incident Country","Incident Town","Διακριτικός Τίτλος","UnderWriter","Validation Case","Doctor","Clinic / Hospital","Authorized","Audit","Inpatient","Outpatient","Assistance Case","Diagnosis"],
-      handlers:"",manualLast:{},columns,presetVersion:3,updated:Date.now()};
+      handlers:"",manualLast:{},columns,presetVersion:4,updated:Date.now()};
   }
   function groupsFromTemplate(sheet,headerRow){
     const g=sheet.rows[headerRow-2]||[];let cur="";const out=[];for(let i=0;i<sheet.maxC;i++){if(g[i])cur=g[i];out.push(cur)}return out;
@@ -834,6 +839,8 @@ async function boot(){
   if(old&&false){const np=C.sompoProfile();const keepA=(old.columns||[]).find(c=>c.letter==="A");
     Object.assign(old,{columns:np.columns.map(c=>c.letter==="A"&&keepA?Object.assign(c,{value:keepA.value}):c),kpi:np.kpi,sourceFields:np.sourceFields,presetVersion:2});await saveProfiles()}
   if(!S.profiles.some(p=>p.id==="sompo")&&!(await Store.get("sompoRemoved"))){const sp=C.sompoProfile();sp.template=SOMPO_TPL;S.profiles.unshift(sp)}
+  const sp4=S.profiles.find(p=>p.id==="sompo");
+  if(sp4&&(sp4.presetVersion||1)<4){const np=C.sompoProfile();["R","S","T","U"].forEach(L=>{const a=sp4.columns.find(c=>c.letter===L),b=np.columns.find(c=>c.letter===L);if(a&&b)Object.assign(a,{suggest:b.suggest||"",hint:b.hint,mode:"manual",fmt:"number"})});sp4.presetVersion=4}
   for(const p of S.profiles){if(p.kind==="kpi"&&p.template&&!p.rules){try{await learnProfile(p,false)}catch(e){console.error(e)}}}
   await saveProfiles();
   render();
@@ -1124,8 +1131,10 @@ function kpiReview(p){
 }
 function refPanel(res){const st=res.stats;const M=C.METRICS;const rows=[];
   const add=(k,v,note)=>rows.push(`<tr><td style="white-space:normal">${esc(k)}</td><td class="n">${esc(v)}</td><td class="small muted" style="white-space:normal">${esc(note||"")}</td></tr>`);
-  if(st.var_mean!=null){add("Initial claimed → final paid, closed in month (mean)",C.fmtMoney(st.var_mean)+" EUR","Not a reserve variance. Use for R/S only if HWA sets the initial reserve at the claimed amount");add("Same (standard deviation)",C.fmtMoney(st.var_sd)+" EUR","")}
-  if(st._initClosed!=null)add("Claimed / paid on claims closed in month",C.fmtMoney(st._initClosed)+" / "+C.fmtMoney(st._paidClosed)+" EUR","");
+  if(st._outstanding!=null)add("Outstanding reserve at month end",C.fmtMoney(st._outstanding)+" EUR","Open files: current reserve (final GOP amount); files closed later: initial reserve");
+  if(st._reserveNew!=null)add("Initial reserve on new claims in month",C.fmtMoney(st._reserveNew)+" EUR","Initial charge − excess");
+  if(st._initClosed!=null){add("Claims closed in month: claimed",C.fmtMoney(st._initClosed)+" EUR","");add("— less excess",C.fmtMoney(st._excClosed)+" EUR","");add("— less HWA savings",C.fmtMoney(st._savClosed)+" EUR","Cost containment, including declined amounts");add("— final paid",C.fmtMoney(st._paidClosed)+" EUR","")}
+  if(st.var_mean!=null)add("Reserve variance per closed claim (mean / SD)",C.fmtMoney(st.var_mean)+" / "+C.fmtMoney(st.var_sd)+" EUR","Final paid − (initial charge − excess). Negative = released below the initial reserve");
   if(st.audit_pct!=null)add("Files with the Audit flag",(st.audit_pct*100).toFixed(1)+"%","Open + closed in last 12 months. Use for AR only if the Audit flag is a peer review");
   if(st.reopened!=null)add("Reopened files open at month end",st.reopened,"");
   if(st._openAll!=null){add("All claims open at month end",st._openAll,"Used for E when \"Open claims\" = all open");add("Claims received in the month and still open",st._openNew,"Used for E when \"Open claims\" = received in the month")}
@@ -1216,7 +1225,9 @@ function kpiPdf(p){
   const ref=[[{text:"Reference figure",style:"th"},{text:"Value",style:"th",alignment:"right"}]];const st2=res.stats;
   Object.entries(st2._ageBands||{}).forEach(([k,v])=>ref.push(["Open at month end, "+k,{text:String(v),alignment:"right"}]));
   Object.entries(st2._byBenefit||{}).forEach(([k,v])=>ref.push(["New claims — "+k,{text:String(v),alignment:"right"}]));
-  if(st2.var_mean!=null)ref.push(["Initial claimed → final paid, closed in month (mean / SD, EUR)",{text:C.fmtMoney(st2.var_mean)+" / "+C.fmtMoney(st2.var_sd),alignment:"right"}]);
+  if(st2._outstanding!=null)ref.push(["Outstanding reserve at month end (EUR)",{text:C.fmtMoney(st2._outstanding),alignment:"right"}]);
+  if(st2._initClosed!=null)ref.push(["Claims closed in month — claimed / excess / savings / paid (EUR)",{text:[st2._initClosed,st2._excClosed,st2._savClosed,st2._paidClosed].map(C.fmtMoney).join(" / "),alignment:"right"}]);
+  if(st2.var_mean!=null)ref.push(["Reserve variance per closed claim, mean / SD (EUR)",{text:C.fmtMoney(st2.var_mean)+" / "+C.fmtMoney(st2.var_sd),alignment:"right"}]);
   const logo=st.logo?{image:st.logo,fit:[140,36]}:{text:[{text:"Health",color:"#1a2f5e",bold:true},{text:"Watch",color:"#c0392b",bold:true}],fontSize:18};
   const dd={pageSize:"A4",pageMargins:[34,34,34,50],defaultStyle:{font:"Roboto",fontSize:8.5,color:"#14203a"},
     content:[{columns:[logo,{stack:[{text:p.name,fontSize:13,bold:true,color:"#1a2f5e",alignment:"right"},{text:"DCA KPI / SLA report · "+res.ctx.period,alignment:"right",fontSize:9.5}]}]},
