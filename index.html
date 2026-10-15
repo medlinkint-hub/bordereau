@@ -347,7 +347,7 @@ var CORE = (function(){
 
   function readTemplate(wb){
     return wb.worksheets.map(ws=>{
-      const maxR=Math.min(ws.rowCount||0,40),maxC=Math.min(Math.max(ws.columnCount||0,1),80);
+      const maxR=Math.min(ws.rowCount||0,150),maxC=Math.min(Math.max(ws.columnCount||0,1),80);
       const rows=[];for(let r=1;r<=maxR;r++){const row=ws.getRow(r);const a=[];for(let c=1;c<=maxC;c++)a.push(cellText(row.getCell(c).value).trim());rows.push(a)}
       return{name:ws.name,rows,maxC};
     });
@@ -525,6 +525,8 @@ var CORE = (function(){
       let maxR=+e.replace(/\D+/g,"")||1,maxC=colNum(e);writes.forEach(w=>{if(w.v!=null&&w.v!==""){maxR=Math.max(maxR,w.r);maxC=Math.max(maxC,w.c)}});dim.setAttribute("ref",(b?a:"A1")+":"+colLetter(maxC)+maxR)}
     const perr=wsx.doc.getElementsByTagName("parsererror");if(perr&&perr.length)throw new Error("Could not read the sheet XML");
     write(target,wsx);if(styleTouched||numFmts)write("xl/styles.xml",st);
+    {const W=wb.doc.documentElement;let cp=kids(W,"calcPr")[0];if(!cp){cp=wb.doc.createElementNS(W.namespaceURI,"calcPr");const after=["oleSize","customWorkbookViews","pivotCaches","smartTagPr","smartTagTypes","webPublishing","fileRecoveryPr","webPublishObjects","extLst"].map(n=>kids(W,n)[0]).find(Boolean);W.insertBefore(cp,after||null)}
+      cp.setAttribute("fullCalcOnLoad","1");write("xl/workbook.xml",wb)}
     /* formulas we overwrote may still be listed in the calc chain, which Excel reports as a damaged file; Excel rebuilds it on open */
     if(zip.file("xl/calcChain.xml")){zip.remove("xl/calcChain.xml");
       const wr=await read("xl/_rels/workbook.xml.rels");Array.from(wr.doc.getElementsByTagNameNS("*","Relationship")).filter(r=>/calcChain/i.test(r.getAttribute("Type")||"")).forEach(r=>r.parentNode.removeChild(r));write("xl/_rels/workbook.xml.rels",wr);
@@ -713,7 +715,7 @@ var CORE = (function(){
     stats._paidClosed=sum(closedC,x=>x.paid);stats._initClosed=sum(closedC,x=>x.init);stats._excClosed=sum(closedC,x=>x.exc);stats._savClosed=r2(stats._initClosed-stats._excClosed-stats._paidClosed);
     /* reserve still open at month end: current reserve for files still open today, initial reserve for files closed after month end */
     stats._outstanding=sum(openC,x=>(x.c?x.initNet:x.paid));stats._reserveNew=sum(newC,x=>x.initNet);
-    const suggested={};
+    const suggested={};const who=String(profile.name||"The insurer").split(/\s+[—-]\s+/)[0];
     const values=(profile.columns||[]).map((s,i)=>{
       switch(s.mode){
         case"const":return s.value||null;
@@ -725,8 +727,8 @@ var CORE = (function(){
           if(raw===undefined&&s.suggest&&stats[s.suggest]!=null){suggested[i]=true;return stats[s.suggest]}
           const v=parseManual(raw,s.fmt);if(Number.isNaN(v)){flags.push({row:"—",key:"",col:i,level:"bad",issue:`${s.header}: "${raw}" is not a number`});return null}
           if(s.fmt==="percent"&&v!=null&&(v<0||v>1)){flags.push({row:"—",key:"",col:i,level:"bad",issue:`${s.header}: ${raw} is outside 0–100%`});return v}
-          if(s.target&&v!=null){if(s.target.min!=null&&v<s.target.min)flags.push({row:"—",key:"",col:i,level:"warn",issue:`${s.header}: ${(v*100).toFixed(2)}% is below the ${(s.target.min*100).toFixed(0)}% target — Sompo will ask why`});
-            if(s.target.max!=null&&v>s.target.max)flags.push({row:"—",key:"",col:i,level:"warn",issue:`${s.header}: ${(v*100).toFixed(2)}% is above the ${(s.target.max*100).toFixed(0)}% limit — Sompo will ask why`})}
+          if(s.target&&v!=null){if(s.target.min!=null&&v<s.target.min)flags.push({row:"—",key:"",col:i,level:"warn",issue:`${s.header}: ${(v*100).toFixed(2)}% is below the ${(s.target.min*100).toFixed(0)}% target — ${who} will ask why`});
+            if(s.target.max!=null&&v>s.target.max)flags.push({row:"—",key:"",col:i,level:"warn",issue:`${s.header}: ${(v*100).toFixed(2)}% is above the ${(s.target.max*100).toFixed(0)}% limit — ${who} will ask why`})}
           return v}
         default:return null;
       }
@@ -789,11 +791,66 @@ var CORE = (function(){
       sourceFields:["Claimant Full Name","HWA-ID","Notification Date","Closed Date","Incident Date","Reference Num","InitalChargeTotalEuro","ExcessEuro","TotalSavingEuro","FinalAmountGOPEURO","Policy Number","Client Insurance","Assistance","Client","Benefit","Claim Status","Travel Check","Incident Country","Incident Town","Διακριτικός Τίτλος","UnderWriter","Validation Case","Doctor","Clinic / Hospital","Authorized","Audit","Inpatient","Outpatient","Assistance Case","Diagnosis"],
       handlers:"",manualLast:{},columns,presetVersion:4,updated:Date.now()};
   }
+  /* ================= KPI GRID (one row per measure, one column per month: JAN … DEC, YTD) ================= */
+  function monthOfHeader(h){const t=norm(h);if(!t)return -1;
+    if(/^\d/.test(t)){const d=toDate(h);return d?d.getMonth():-1}
+    const tok=t.split(" ")[0].replace(/\d+$/,"");if(tok.length<3)return -1;
+    return MONTHS.findIndex(m=>m.toLowerCase().startsWith(tok))}
+  function gridLayout(sheet,headerRow){
+    const row=sheet.rows[headerRow-1]||[];const months={};let label=0,target=0,ytd=0;const defs=[];
+    row.forEach((t,i)=>{const c=i+1;if(!t)return;const m=monthOfHeader(t);if(m>=0){if(months[m]==null)months[m]=c;return}
+      const n=norm(t);if(/^ytd|year to date|^total$/.test(n))ytd=ytd||c;else if(/target|sla|standard/.test(n)&&!target)target=c;else if(/defin|descr|explan|comment|note|method/.test(n))defs.push(c);else if(!label)label=c});
+    return{months,label:label||1,target,ytd,defs,count:Object.keys(months).length};
+  }
+  const isGridTemplate=(sheet,headerRow)=>!!sheet&&gridLayout(sheet,headerRow).count>=6;
+  function gridGuess(h,fmt){const t=norm(h);if(fmt!=="count"&&fmt!=="days")return null;
+    if(/handler/.test(t))return{mode:"metric",metric:/new/.test(t)?"new_per_handler":"open_per_handler",fmt:"number"};
+    if(fmt==="days"||/average|mean/.test(t)){if(/clos|settl|final/.test(t)&&/notif|fnol|receiv|open/.test(t))return{mode:"metric",metric:"avg_notif_close",fmt:"days"};return null}
+    if(/reopen|re open/.test(t))return null;
+    if(/\b(new|received|notified|reported|registered|opened)\b/.test(t)&&/claim|case|file/.test(t))return{mode:"metric",metric:"new_claims",fmt:"count"};
+    if(/\b(open|outstanding|pending|live)\b/.test(t)&&/claim|case|file/.test(t))return{mode:"metric",metric:"open_eom",fmt:"count"};
+    if(/\b(closed|finali[sz]ed|settled|completed)\b/.test(t)&&/claim|case|file/.test(t))return{mode:"metric",metric:"closed_claims",fmt:"count"};
+    if(/walk ?away/.test(t))return{mode:"manual",fmt:"count",suggest:"walkaway_est"};
+    if(/declin|rejected|repudiat/.test(t))return{mode:"manual",fmt:"count",suggest:"declined_est"};
+    return null}
+  function gridColumns(sheet,headerRow){
+    const L=gridLayout(sheet,headerRow);const out=[];let group="";
+    for(let r=headerRow;r<sheet.rows.length;r++){const a=sheet.rows[r]||[];const lab=String(a[L.label-1]||"").replace(/\s+/g," ").trim();if(!lab||lab.includes("{{"))continue;
+      const tg=L.target?String(a[L.target-1]||"").trim():"";const df=L.defs.map(c=>String(a[c-1]||"").trim()).filter(Boolean).join(" · ");
+      const heading=!tg&&!df&&!Object.values(L.months).some(c=>a[c-1])&&lab===lab.toUpperCase()&&/[A-Z]/.test(lab);
+      if(heading)group=lab;
+      const all=lab+" "+tg+" "+df;
+      const fmt=/%|percent|ratio|proportion|within|sla/i.test(lab+" "+tg)?"percent":/average (number of )?days|days between|turnaround|\bdays\b.*\b(avg|average)\b/i.test(all)&&!/%/.test(tg)?"days":/average|mean|\bsd\b|standard deviation|amount|eur|cost|reserve/i.test(lab)?"number":"count";
+      const pt=parseTarget(tg);const g=heading?null:gridGuess(lab,fmt);
+      out.push(Object.assign({row:r+1,col:0,letter:"R"+(r+1),header:lab,group:heading?"":group,value:"",required:false,pdf:true,source:"",
+        mode:heading?"blank":"manual",fmt:heading?"text":fmt,heading,hint:heading?"Heading row — left empty":tg?"Target: "+tg:df.slice(0,140),
+        def:{name:lab,target:tg,explained:df}},pt&&fmt==="percent"?{target:pt}:{},g||{}))}
+    return{layout:L,columns:out};
+  }
+  function defaultKpi(){return{notif:"Notification Date",closed:"Closed Date",status:"Claim Status",key:"HWA-ID",paid:"FinalAmountGOPEURO",initial:"InitalChargeTotalEuro",excess:"ExcessEuro",saving:"TotalSavingEuro",audit:"Audit",authorized:"Authorized",benefit:"Benefit",
+    clientField:"",clientValue:"",openValues:"Open,ReOpened",closedValues:"Closed",reopenValues:"ReOpened",staticDays:90,nilDays:60,lob:"A&H",openBasis:"all"}}
+  async function buildKpiGridWorkbook(ExcelJS,profile,templateBuf,res,JSZip){
+    const wb=new ExcelJS.Workbook();await wb.xlsx.load(templateBuf.slice(0));const ws=wb.getWorksheet(profile.sheet)||wb.worksheets[0];
+    const G=profile.grid||{months:{}};const mi=res.ctx.from.getMonth();const mc=G.months[mi];
+    if(!mc)throw new Error(`The template has no ${MONTHS[mi]} column`);
+    const raw=(r,c)=>ws.getRow(r).getCell(c).value;
+    const val=(r,c)=>{const v=raw(r,c);return v&&typeof v==="object"&&!(v instanceof Date)&&"result" in v?v.result:v};
+    const isF=(r,c)=>{const v=raw(r,c);return !!(v&&typeof v==="object"&&(v.formula||v.sharedFormula))};
+    const writes=[];let replaced=false;
+    (profile.columns||[]).forEach((s,j)=>{if(!s.row||s.mode==="blank"||isF(s.row,mc))return;const v=res.values[j];const old=val(s.row,mc);if(old!=null&&old!=="")replaced=true;
+      const code=NUMFMT[s.fmt]||(s.fmt==="text"?"@":null);writes.push({r:s.row,c:mc,v:(v==null||v==="")?null:v,fmt:code});
+      /* YTD: sum of the months for counts, average for rates and days — unless the template already has a formula there */
+      if(G.ytd&&s.fmt!=="text"&&s.fmt!=="date"&&!isF(s.row,G.ytd)){const xs=[];
+        for(let m=0;m<=mi;m++){const c=G.months[m];if(!c)continue;const x=m===mi?v:val(s.row,c);const n=typeof x==="number"?x:toNum(x);if(n!=null&&!(x===""||x==null))xs.push(n)}
+        if(xs.length){const tot=xs.reduce((a,b)=>a+b,0);writes.push({r:s.row,c:G.ytd,v:s.fmt==="count"?tot:Math.round(tot/xs.length*10000)/10000,fmt:code})}}});
+    const buf=await patchXlsx(JSZip,templateBuf.slice(0),ws.name,writes);
+    return{buf,col:colLetter(mc),month:MONTHS[mi],replaced,grid:true};
+  }
   function groupsFromTemplate(sheet,headerRow){
     const g=sheet.rows[headerRow-2]||[];let cur="";const out=[];for(let i=0;i<sheet.maxC;i++){if(g[i])cur=g[i];out.push(cur)}return out;
   }
 
-  return{parseTarget,learnRules,applyLearned,patchXlsx,sompoProfile,METRICS,NUMFMT,parseManual,computeKpi,buildKpiWorkbook,groupsFromTemplate,MONTHS,norm,autoMatch,colLetter,letterToCol,toDate,toNum,fmtDate,fmtMoney,periodLabel,monthRange,cellText,detectHeaderRow,parseSource,computeRows,readTemplate,headersFromTemplate,buildWorkbook,buildDemoTemplate,demoProfile,demoCases};
+  return{monthOfHeader,gridLayout,isGridTemplate,gridColumns,defaultKpi,buildKpiGridWorkbook,parseTarget,learnRules,applyLearned,patchXlsx,sompoProfile,METRICS,NUMFMT,parseManual,computeKpi,buildKpiWorkbook,groupsFromTemplate,MONTHS,norm,autoMatch,colLetter,letterToCol,toDate,toNum,fmtDate,fmtMoney,periodLabel,monthRange,cellText,detectHeaderRow,parseSource,computeRows,readTemplate,headersFromTemplate,buildWorkbook,buildDemoTemplate,demoProfile,demoCases};
 })();
 if(typeof module!=="undefined")module.exports=CORE;
 </script>
@@ -883,6 +940,8 @@ async function boot(){
   if(!S.profiles.some(p=>p.id==="sompo")&&!(await Store.get("sompoRemoved"))){const sp=C.sompoProfile();sp.template=SOMPO_TPL;S.profiles.unshift(sp)}
   const sp4=S.profiles.find(p=>p.id==="sompo");
   if(sp4&&(sp4.presetVersion||1)<4){const np=C.sompoProfile();["R","S","T","U"].forEach(L=>{const a=sp4.columns.find(c=>c.letter===L),b=np.columns.find(c=>c.letter===L);if(a&&b)Object.assign(a,{suggest:b.suggest||"",hint:b.hint,mode:"manual",fmt:"number"})});sp4.presetVersion=4}
+  for(const p of S.profiles){if(p.template&&p.layout!=="grid"&&p.kind!=="kpi"&&(p.columns||[]).filter(c=>C.monthOfHeader(c.header)>=0).length>=6){
+    try{const wb=new ExcelJS.Workbook();await wb.xlsx.load(b642ab(p.template));const sh=C.readTemplate(wb).find(x=>x.name===p.sheet)||C.readTemplate(wb)[0];if(C.isGridTemplate(sh,p.headerRow))makeGrid(p,sh)}catch(e){console.error(e)}}}
   for(const p of S.profiles){if(p.kind==="kpi"&&p.template&&!p.rules){try{await learnProfile(p,false)}catch(e){console.error(e)}}}
   await saveProfiles();
   render();
@@ -891,7 +950,11 @@ async function addDemo(){
   try{const buf=await C.buildDemoTemplate(ExcelJS);const p=C.demoProfile();p.template=ab2b64(buf);S.profiles.push(p);await Store.set("profiles",S.profiles)}catch(e){console.error(e)}
 }
 const saveProfiles=()=>Store.set("profiles",S.profiles);
-async function learnProfile(p,fresh,wb){if(!wb){wb=new ExcelJS.Workbook();await wb.xlsx.load(b642ab(p.template))}
+/* templates with JAN … DEC columns (one row per KPI) are monthly KPI grids, not case listings */
+function makeGrid(p,sh){const g=C.gridColumns(sh,p.headerRow);const old={};(p.layout==="grid"?p.columns||[]:[]).forEach(c=>old[c.header+"|"+c.row]=c);
+  p.kind="kpi";p.layout="grid";p.grid=g.layout;p.dataStartRow=p.headerRow+1;p.legendRow=0;p.totalsRow=false;p.periodField="";
+  p.kpi=Object.assign(C.defaultKpi(),p.kpi||{});p.columns=g.columns.map(c=>old[c.header+"|"+c.row]?Object.assign({},old[c.header+"|"+c.row],{row:c.row,letter:c.letter,group:c.group,def:c.def}):c);return p}
+async function learnProfile(p,fresh,wb){if(p.layout==="grid")return{entries:[],cols:{},explainSheet:""};if(!wb){wb=new ExcelJS.Workbook();await wb.xlsx.load(b642ab(p.template))}
   p.kpi=p.kpi||{lob:"A&H",openBasis:"all"};const lr=C.learnRules(wb,p.sheet,p.headerRow);C.applyLearned(p,lr,fresh);return lr}
 
 /* idle lock */
@@ -1103,7 +1166,7 @@ function kpiRunView(p){
   const chips=`<div class="chips" role="group" aria-label="Insurer">${S.profiles.map(x=>`<button class="chip" data-pid="${x.id}" aria-pressed="${x.id===R.pid}">${esc(x.name)}</button>`).join("")}</div>`;
   const manualCols=p.columns.map((c,i)=>[c,i]).filter(([c])=>c.mode==="manual");
   const groups=[];manualCols.forEach(([c,i])=>{let g=groups.find(x=>x.name===(c.group||""));if(!g){g={name:c.group||"",items:[]};groups.push(g)}g.items.push([c,i])});
-  return`<div class="pagehead"><div><h1>Monthly KPI report</h1><p class="muted">${esc(shortName(p))} wants one row per month in their own template. Counts come from the case export; SLA figures you type in.</p></div>
+  return`<div class="pagehead"><div><h1>Monthly KPI report</h1><p class="muted">${esc(shortName(p))} wants ${p.layout==="grid"?"one column per month (one row per KPI)":"one row per month"} in their own template. Counts come from the case export; SLA figures you type in.</p></div>
     ${p.dueDay?(()=>{const[y,m]=R.ym.split("-").map(Number);const late=new Date()>new Date(y,m,p.dueDay,23,59);return`<span class="pill ${late?"bad":"neutral"}">${late?"Overdue — ":""}${esc(late?dueText(p,R.ym).replace("Due","was due"):dueText(p,R.ym))}</span>`})():""}</div>
   <section class="panel"><div class="step done"><div class="step-n">1</div><div class="step-body"><h2>Insurance company</h2>${chips}</div></div></section>
   <section class="panel"><div class="step ${R.src?"done":""}"><div class="step-n">2</div><div class="step-body">
@@ -1119,7 +1182,7 @@ function kpiRunView(p){
       <label class="f" style="width:190px">Claims handlers on this book<input type="number" min="0" step="0.5" id="handlers" value="${esc(R.handlers)}" placeholder="e.g. 2"></label>
       <div class="grow" style="min-width:240px"><span class="f" style="font-size:12.5px;font-weight:600;color:var(--muted)">Write into</span>
         <div class="row" style="margin-top:5px">${R.prev?`<span class="pill ok">Last submitted file</span><span class="mono">${esc(R.prevName)}</span><button class="btn ghost" id="clearPrev">Use blank template</button>`
-        :`<span class="small muted">Blank template, row ${p.dataStartRow}</span><label class="btn sec" for="prevFile" tabindex="0" style="padding:6px 12px">Continue last month's file</label><input type="file" id="prevFile" accept=".xlsx" hidden>`}</div></div>
+        :`<span class="small muted">${p.layout==="grid"?`Blank template — earlier months empty`:`Blank template, row ${p.dataStartRow}`}</span><label class="btn sec" for="prevFile" tabindex="0" style="padding:6px 12px">Continue last month's file</label><input type="file" id="prevFile" accept=".xlsx" hidden>`}</div></div>
     </div>
   </div></div></section>
   <section class="panel"><div class="step"><div class="step-n">4</div><div class="step-body">
@@ -1193,11 +1256,11 @@ function remarksPanel(p,res){const R=S.run;
     <div><button class="btn sec" id="addRem" style="padding:6px 12px">Add a remark to a column</button></div>
     <label class="f">General remark for the month<textarea id="remNote" rows="3" style="background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:8px 10px;resize:vertical;color:var(--ink)" placeholder="Optional">${esc(R.note)}</textarea></label>
   </div></div></section>`}
-function emailText(p,res){const R=S.run;const st=S.settings;const v=l=>{const i=p.columns.findIndex(c=>c.letter===l);return i>=0?res.values[i]:null};
+function emailText(p,res){const R=S.run;const st=S.settings;const v=k=>{const i=p.columns.findIndex(c=>c.mode==="metric"&&c.metric===k);return i>=0?res.values[i]:null};
   const schemeI=p.columns.findIndex(c=>c.header==="Scheme");const scheme=schemeI>=0&&res.values[schemeI]?` (Scheme: ${res.values[schemeI]})`:"";
-  const lines=[`Subject: HealthWatch Assistance S.A. – DCA KPI report – ${res.ctx.period}`,"",`Dear Sir/Madam,`,"",`Please find attached the DCA KPI report for ${res.ctx.period}${scheme}.`,""];
+  const lines=[`Subject: HealthWatch Assistance S.A. – ${p.layout==="grid"?"":"DCA "}KPI report – ${res.ctx.period}`,"",`Dear Sir/Madam,`,"",`Please find attached the ${p.layout==="grid"?"":"DCA "}KPI report for ${res.ctx.period}${scheme}.`,""];
   const parts=[];const add=(l,label,fmt)=>{const x=v(l);if(x!=null)parts.push(`${label} ${kpiShow(x,fmt)}`)};
-  add("D","New claims","count");add("E","Open at month end","count");add("F","Closed","count");add("AL","Average notification to closure","days");
+  add("new_claims","New claims","count");add("open_eom","Open at month end","count");add("closed_claims","Closed","count");add("avg_notif_close","Average notification to closure","days");
   if(parts.length)lines.push("Summary: "+parts.join(" · ")+".","");
   const rem=R.remarks.filter(r=>r.text.trim());
   if(rem.length||R.note.trim()){lines.push("Remarks:");rem.forEach(r=>{const c=p.columns[r.col];lines.push(`- ${c.letter} ${c.header}: ${r.text.trim()}`)});if(R.note.trim())lines.push(rem.length?"- "+R.note.trim():R.note.trim());lines.push("")}
@@ -1240,7 +1303,7 @@ function bindKpiRun(p){
 function bindKpiDl(p){
   document.querySelectorAll("[data-goto]").forEach(b=>b.onclick=()=>{const el=document.querySelector(`[data-man="${b.dataset.goto}"]`);if(el){el.scrollIntoView({behavior:"smooth",block:"center"});setTimeout(()=>el.focus(),350)}});
   $("#ackBlank")&&($("#ackBlank").onchange=e=>{S.run.ackBlank=e.target.checked;const d=$("#dlK");if(d)d.disabled=!e.target.checked});$("#dlK")&&($("#dlK").onclick=()=>downloadKpi(p));$("#dlKP")&&($("#dlKP").onclick=()=>kpiPdf(p));if(S.run.res)bindRemarks(p)}
-function kpiBase(p){return `HWA_${(p.code||p.name).replace(/[^A-Za-z0-9]+/g,"-")}_DCA_KPI_${S.run.ym}`}
+function kpiBase(p){return `HWA_${(p.code||p.name).replace(/[^A-Za-z0-9]+/g,"-")}_${p.layout==="grid"?"":"DCA_"}KPI_${S.run.ym}`}
 async function logKpi(p,kind){
   const R=S.run,res=R.res;p.manualLast=p.manualLast||{};p.columns.forEach((c,i)=>{if(c.remember&&R.manual[i]!=null)p.manualLast[c.letter]=R.manual[i]});p.handlers=R.handlers;p.lastRun=Date.now();await saveProfiles();
   const totals={};p.columns.forEach((c,i)=>{if(c.mode==="metric")totals[c.header]=res.values[i]});
@@ -1249,9 +1312,9 @@ async function logKpi(p,kind){
 }
 async function downloadKpi(p){
   const btn=$("#dlK");btn.disabled=true;
-  try{const tpl=S.run.prev?S.run.prev.slice(0):b642ab(p.template);const o=await C.buildKpiWorkbook(ExcelJS,p,tpl,S.run.res,JSZip);
+  try{const tpl=S.run.prev?S.run.prev.slice(0):b642ab(p.template);const o=p.layout==="grid"?await C.buildKpiGridWorkbook(ExcelJS,p,tpl,S.run.res,JSZip):await C.buildKpiWorkbook(ExcelJS,p,tpl,S.run.res,JSZip);
     await saveFile(kpiBase(p)+".xlsx",new Blob([o.buf],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}));
-    toast(o.replaced?`Row ${o.row} replaced (same month already there)`:`Written to row ${o.row}`);await logKpi(p,"kpi xlsx")}
+    toast(o.grid?`${o.month} written to column ${o.col}${o.replaced?" (replaced what was there)":""}`:o.replaced?`Row ${o.row} replaced (same month already there)`:`Written to row ${o.row}`);await logKpi(p,"kpi xlsx")}
   catch(e){console.error(e);toast("Could not build the file: "+(e.message||e))}
   btn.disabled=false;
 }
@@ -1292,11 +1355,11 @@ function kpiEditSections(p,sh,srcOpts,opt){
       <optgroup label="Calculated from the case export">${Object.entries(C.METRICS).filter(([,m])=>!m.proxy).map(([k,m])=>opt("m:"+k,m.label,cur)).join("")}</optgroup>
       <optgroup label="Typed in, prefilled from the export">${Object.entries(C.METRICS).filter(([,m])=>m.proxy).map(([k,m])=>opt("s:"+k,m.label,c.mode==="manual"&&c.suggest?"s:"+c.suggest:"")).join("")}</optgroup></select>
       ${c.mode==="const"?`<input type="text" data-const="${i}" value="${esc(c.value)}" placeholder="Text for this cell" style="margin-top:5px">`:""}`};
-  const sel=(id,cur,none)=>`<select id="${id}">${opt("",none||"— choose —",cur||"")}${srcOpts.map(f=>opt(f,f,(cur||"").trim()===f.trim()?f:cur)).join("")}</select>`;
-  return`<section class="panel"><div class="row" style="justify-content:space-between"><h2>What goes in each column</h2>
+  const sel=(id,cur,none)=>`<select id="${id}">${opt("",none||"— choose —",cur||"")}${cur&&!srcOpts.some(f=>f.trim()===String(cur).trim())?opt(cur,cur,cur):""}${srcOpts.map(f=>opt(f,f,(cur||"").trim()===f.trim()?f:cur)).join("")}</select>`;
+  return`<section class="panel"><div class="row" style="justify-content:space-between"><h2>What goes in each ${p.layout==="grid"?"row":"column"}</h2>
       <div class="row"><label class="btn sec" for="smpFile" tabindex="0">${srcOpts.length?"Replace sample export":"Upload a sample case export"}</label><input id="smpFile" type="file" accept=".xlsx,.xls,.csv" hidden></div></div>
-    <p class="hint">One row is written per month. Columns that are only headings over other columns should stay empty.</p>
-    <div class="tbl-wrap"><table class="map"><thead><tr><th>Col</th><th>Their column</th><th style="min-width:230px">Filled from</th><th>Type</th><th style="min-width:200px">Guidance shown when typing</th><th>Required</th></tr></thead><tbody>
+    <p class="hint">${p.layout==="grid"?"Each KPI row gets one value per month. Heading rows should stay empty.":"One row is written per month. Columns that are only headings over other columns should stay empty."}</p>
+    <div class="tbl-wrap"><table class="map"><thead><tr><th>${p.layout==="grid"?"Row":"Col"}</th><th>${p.layout==="grid"?"Their KPI":"Their column"}</th><th style="min-width:230px">Filled from</th><th>Type</th><th style="min-width:200px">Guidance shown when typing</th><th>Required</th></tr></thead><tbody>
     ${p.columns.map((c,i)=>`<tr><td class="col">${c.letter}</td><td style="max-width:320px"><span class="small muted">${esc(c.group||"")}</span><br><b>${esc(c.header)}</b>${c.def&&c.def.target&&c.def.target!=="N/A"?`<br><span class="small" style="color:var(--primary)">${esc(c.def.target)}</span>`:""}${c.heading?`<br><span class="pill neutral">Heading in client example</span>`:""}</td><td>${fill(c,i)}</td>
       <td><select data-kfmt="${i}" aria-label="Type">${opt("text","Text",c.fmt)}${opt("date","Month (date)",c.fmt)}${opt("count","Count",c.fmt)}${opt("percent","Percent",c.fmt)}${opt("number","Number (2 dp)",c.fmt)}${opt("days","Days (1 dp)",c.fmt)}</select></td>
       <td><input type="text" data-khint="${i}" value="${esc(c.hint||"")}" placeholder="e.g. Target 95% within 48 h"></td>
@@ -1362,7 +1425,7 @@ function editView(){
   <section class="panel"><h2>Details</h2>
     <div class="row"><label class="f grow">Insurance company<input type="text" id="e_name" value="${esc(p.name)}" placeholder="e.g. Allianz Partners"></label>
     <label class="f" style="width:150px">Short code (file name)<input type="text" id="e_code" value="${esc(p.code)}" placeholder="ALZ"></label></div>
-    <div class="row"><label class="f grow">Report type<select id="e_kind">${opt("cases","Case listing — one row per case",p.kind||"cases")}${opt("kpi","Monthly KPI / SLA report — one row per month",p.kind||"cases")}</select></label>
+    <div class="row"><label class="f grow">Report type<select id="e_kind">${opt("cases","Case listing — one row per case",p.kind||"cases")}${opt("kpi",p.layout==="grid"?"Monthly KPI / SLA report — one column per month":"Monthly KPI / SLA report — one row per month",p.kind||"cases")}</select></label>
     <label class="f" style="width:190px">Due day of next month<input type="number" min="1" max="31" id="e_due" value="${esc(p.dueDay||"")}" placeholder="e.g. 10"></label></div>
   </section>
   <section class="panel"><h2>Bordereau template</h2>
@@ -1372,7 +1435,8 @@ function editView(){
       <label class="f" style="width:200px">Sheet<select id="e_sheet">${E.sheets.map(s=>opt(s.name,s.name,sh.name)).join("")}</select></label>
       <label class="f" style="width:150px">Column titles on row<input type="number" min="1" max="40" id="e_hr" value="${p.headerRow}"></label>
       <label class="f" style="width:150px">First data row<input type="number" min="1" max="60" id="e_ds" value="${p.dataStartRow}"></label></div>
-      ${p.kind==="kpi"?`<div class="notice info small"><span>${p.rules&&p.rules.explainSheet?`Definitions and targets come from the client's own sheet <b>${esc(p.rules.explainSheet)}</b>${p.rules.exampleSheet?`, formats from <b>${esc(p.rules.exampleSheet)}</b>`:""}.`:"No explanation sheet was found in this template; targets and definitions can be typed in below."}
+      ${p.layout==="grid"?`<div class="notice info small"><span>One row per KPI, one column per month (${Object.keys(p.grid&&p.grid.months||{}).length} month columns found${p.grid&&p.grid.ytd?`, YTD in column ${C.colLetter(p.grid.ytd)}`:""}). Each run fills the column of the chosen month${p.grid&&p.grid.ytd?" and updates YTD":""}; use "Continue last month's file" to keep earlier months.</span></div>`
+      :p.kind==="kpi"?`<div class="notice info small"><span>${p.rules&&p.rules.explainSheet?`Definitions and targets come from the client's own sheet <b>${esc(p.rules.explainSheet)}</b>${p.rules.exampleSheet?`, formats from <b>${esc(p.rules.exampleSheet)}</b>`:""}.`:"No explanation sheet was found in this template; targets and definitions can be typed in below."}
         <button class="btn ghost" id="relearn" style="padding:2px 8px">Re-read definitions</button><button class="btn ghost" id="rebuild" style="padding:2px 8px">Set up columns again from the rules</button></span></div>
       <div class="row"><label class="f" style="width:240px">Row with notes under the data (0 = none)<input type="number" min="0" max="80" id="e_legend" value="${p.legendRow||0}"></label><p class="hint grow">New months go above this row; a month already in the file is overwritten.</p></div>`:`<div class="row small"><label class="row" style="gap:6px"><input type="checkbox" id="e_footer" ${p.hasFooter?"checked":""}> The template has rows under the data (signature, totals) that must move down</label>
       <label class="row" style="gap:6px"><input type="checkbox" id="e_totals" ${p.totalsRow&&!p.hasFooter?"checked":""} ${p.hasFooter?"disabled":""}> Add a TOTAL row after the cases</label></div>`}`:""}
@@ -1405,7 +1469,7 @@ function bindEdit(){
   const close=()=>{S.edit=null;render();window.scrollTo(0,0)};
   $("#back").onclick=close;$("#cancelEd").onclick=close;
   ["e_name","e_code","e_due"].forEach(id=>$("#"+id).oninput=()=>pull());
-  $("#e_kind").onchange=async()=>{pull();if(E.sheets){p.columns=[];rebuildCols();if(p.kind==="kpi"&&p.template)await learnProfile(p,true)}render()};
+  $("#e_kind").onchange=async()=>{pull();if(E.sheets){p.columns=[];rebuildCols();if(p.layout==="grid"&&p.kind!=="kpi"){p.kind="kpi";toast("This template has one column per month, so it can only be a monthly KPI report.")}if(p.kind==="kpi"&&p.template)await learnProfile(p,true)}render()};
   $("#relearn")&&($("#relearn").onclick=async()=>{pull();const lr=await learnProfile(p,false);toast(lr.explainSheet?`Definitions and targets re-read from "${lr.explainSheet}"`:"No explanation sheet in this template");render()});
   $("#rebuild")&&($("#rebuild").onclick=async()=>{pull();await learnProfile(p,true);toast("Columns set up again from the client's rules — check them");render()});
   $("#e_legend")&&($("#e_legend").onchange=()=>pull());
@@ -1415,6 +1479,7 @@ function bindEdit(){
   document.querySelectorAll("[data-kfmt]").forEach(sl=>sl.onchange=()=>{p.columns[+sl.dataset.kfmt].fmt=sl.value});
   document.querySelectorAll("[data-khint]").forEach(sl=>sl.oninput=()=>{p.columns[+sl.dataset.khint].hint=sl.value});
   const rebuildCols=()=>{const sh=E.sheets.find(s=>s.name===p.sheet)||E.sheets[0];p.sheet=sh.name;
+    if(C.isGridTemplate(sh,p.headerRow)){makeGrid(p,sh);return}if(p.layout==="grid"){p.layout="";p.grid=null;p.columns=[]}
     const old={};(p.columns||[]).forEach(c=>old[c.header]=c);
     const grp=C.groupsFromTemplate(sh,p.headerRow);
     p.columns=C.headersFromTemplate(sh,p.headerRow).map(h=>old[h.header]?Object.assign({},old[h.header],{col:h.col,letter:h.letter,group:grp[h.col-1]}):
@@ -1423,7 +1488,8 @@ function bindEdit(){
     try{const T=await openTemplate(f);const buf=T.buf,wb=T.wb;E.sheets=C.readTemplate(wb);p.template=ab2b64(buf);p.templateName=T.name;
       if(T.converted)toast(`"${f.name}" was converted to .xlsx so it can be filled. Colours or logos may be simpler — for the exact look, open it in Excel, Save As .xlsx and upload that.`);
       const sh=E.sheets[0];p.sheet=sh.name;p.headerRow=C.detectHeaderRow(sh.rows)+1;p.dataStartRow=p.headerRow+1;rebuildCols();
-      if(p.kind==="kpi"){const lr=await learnProfile(p,true,wb);const leg=findLegend(sh,p.headerRow);if(leg)p.legendRow=leg;toast(lr.explainSheet?`Rules read from "${lr.explainSheet}"${lr.exampleSheet?` and "${lr.exampleSheet}"`:""}`:"No explanation sheet found — set the columns by hand")}
+      if(p.layout==="grid")toast(`${sh.name}: one row per KPI and one column per month — set up as a monthly KPI report. Check what fills each row.`);
+      else if(p.kind==="kpi"){const lr=await learnProfile(p,true,wb);const leg=findLegend(sh,p.headerRow);if(leg)p.legendRow=leg;toast(lr.explainSheet?`Rules read from "${lr.explainSheet}"${lr.exampleSheet?` and "${lr.exampleSheet}"`:""}`:"No explanation sheet found — set the columns by hand")}
       if(p.kind!=="kpi"&&p.sourceFields&&p.sourceFields.length)autoMapAll(false);render()}
     catch(e){console.error(e);toast("Could not read the template ("+(e.message||e)+"). Open it in Excel, Save As .xlsx and upload it again.")}};
   if($("#e_sheet")){
