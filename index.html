@@ -361,7 +361,7 @@ var CORE = (function(){
   const toUTC=d=>new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));
 
   async function buildWorkbook(ExcelJS,profile,templateBuf,res,JSZip){
-    if(JSZip&&!profile.hasFooter)return buildCasesSurgical(ExcelJS,JSZip,profile,templateBuf,res);
+    if(JSZip&&!profile.hasFooter){try{return await buildCasesSurgical(ExcelJS,JSZip,profile,templateBuf,res)}catch(e){console.warn("Direct fill failed, rebuilding with ExcelJS",e)}}
     const wb=new ExcelJS.Workbook();await wb.xlsx.load(templateBuf);
     const ws=wb.getWorksheet(profile.sheet)||wb.worksheets[0];
     const start=profile.dataStartRow, specs=profile.columns, n=res.out.length;
@@ -525,6 +525,10 @@ var CORE = (function(){
       let maxR=+e.replace(/\D+/g,"")||1,maxC=colNum(e);writes.forEach(w=>{if(w.v!=null&&w.v!==""){maxR=Math.max(maxR,w.r);maxC=Math.max(maxC,w.c)}});dim.setAttribute("ref",(b?a:"A1")+":"+colLetter(maxC)+maxR)}
     const perr=wsx.doc.getElementsByTagName("parsererror");if(perr&&perr.length)throw new Error("Could not read the sheet XML");
     write(target,wsx);if(styleTouched||numFmts)write("xl/styles.xml",st);
+    /* formulas we overwrote may still be listed in the calc chain, which Excel reports as a damaged file; Excel rebuilds it on open */
+    if(zip.file("xl/calcChain.xml")){zip.remove("xl/calcChain.xml");
+      const wr=await read("xl/_rels/workbook.xml.rels");Array.from(wr.doc.getElementsByTagNameNS("*","Relationship")).filter(r=>/calcChain/i.test(r.getAttribute("Type")||"")).forEach(r=>r.parentNode.removeChild(r));write("xl/_rels/workbook.xml.rels",wr);
+      const ct=await read("[Content_Types].xml");Array.from(ct.doc.getElementsByTagNameNS("*","Override")).filter(o=>/calcChain/i.test(o.getAttribute("PartName")||"")).forEach(o=>o.parentNode.removeChild(o));write("[Content_Types].xml",ct)}
     return zip.generateAsync({type:"arraybuffer",compression:"DEFLATE",mimeType:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
   }
   /* ---------- learn each client's own rules from its explanation + example sheets ---------- */
@@ -815,6 +819,15 @@ const $=s=>document.querySelector(s);
 const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const ab2b64=buf=>{const b=new Uint8Array(buf);let s="";for(let i=0;i<b.length;i+=0x8000)s+=String.fromCharCode.apply(null,b.subarray(i,i+0x8000));return btoa(s)};
 const b642ab=s=>{const bin=atob(s);const b=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)b[i]=bin.charCodeAt(i);return b.buffer};
+/* open an insurer template: .xlsx as it is; .xls, .xlsm or an .xlsx that ExcelJS cannot read is first re-saved as a plain .xlsx */
+async function openTemplate(file){
+  const orig=await file.arrayBuffer();let first=null;
+  if(/\.xlsx$/i.test(file.name)){try{const wb=new ExcelJS.Workbook();await wb.xlsx.load(orig.slice(0));return{buf:orig,wb,name:file.name,converted:false}}catch(e){console.warn("ExcelJS could not open the template, converting",e);first=e}}
+  try{const x=XLSX.read(new Uint8Array(orig),{type:"array",cellStyles:true,cellDates:true,bookVBA:false});
+    const buf=XLSX.write(x,{type:"array",bookType:"xlsx",cellStyles:true});const wb=new ExcelJS.Workbook();await wb.xlsx.load(buf.slice(0));
+    return{buf,wb,name:file.name.replace(/\.[^.]+$/,"")+".xlsx",converted:true}}
+  catch(e){console.error(e);throw first||e}
+}
 async function sha(t){const d=await crypto.subtle.digest("SHA-256",new TextEncoder().encode("hwa-bdx:"+t));return[...new Uint8Array(d)].map(x=>x.toString(16).padStart(2,"0")).join("")}
 function toast(msg){const t=document.createElement("div");t.className="toast";t.textContent=msg;t.setAttribute("role","status");document.body.appendChild(t);setTimeout(()=>t.remove(),3200)}
 
@@ -1353,8 +1366,8 @@ function editView(){
     <label class="f" style="width:190px">Due day of next month<input type="number" min="1" max="31" id="e_due" value="${esc(p.dueDay||"")}" placeholder="e.g. 10"></label></div>
   </section>
   <section class="panel"><h2>Bordereau template</h2>
-    <div class="row"><div class="grow">${p.templateName?`<span class="pill ok">Loaded</span> <span class="mono">${esc(p.templateName)}</span>`:`<span class="muted">Upload the insurer's empty bordereau (.xlsx). Its formatting, logo and header rows are kept.</span>`}</div>
-    <label class="btn sec" for="tplFile" tabindex="0">${p.templateName?"Replace template":"Upload template"}</label><input id="tplFile" type="file" accept=".xlsx" hidden></div>
+    <div class="row"><div class="grow">${p.templateName?`<span class="pill ok">Loaded</span> <span class="mono">${esc(p.templateName)}</span>`:`<span class="muted">Upload the insurer's empty bordereau (.xlsx; .xls is converted). Its formatting, logo and header rows are kept.</span>`}</div>
+    <label class="btn sec" for="tplFile" tabindex="0">${p.templateName?"Replace template":"Upload template"}</label><input id="tplFile" type="file" accept=".xlsx,.xlsm,.xls" hidden></div>
     ${sh?`<div class="row">
       <label class="f" style="width:200px">Sheet<select id="e_sheet">${E.sheets.map(s=>opt(s.name,s.name,sh.name)).join("")}</select></label>
       <label class="f" style="width:150px">Column titles on row<input type="number" min="1" max="40" id="e_hr" value="${p.headerRow}"></label>
@@ -1407,11 +1420,12 @@ function bindEdit(){
     p.columns=C.headersFromTemplate(sh,p.headerRow).map(h=>old[h.header]?Object.assign({},old[h.header],{col:h.col,letter:h.letter,group:grp[h.col-1]}):
       (p.kind==="kpi"?{...h,group:grp[h.col-1],mode:"manual",metric:"",source:"",value:"",fmt:"number",hint:"",required:false,pdf:true}:{...h,mode:"blank",source:"",value:"",fmt:"auto",required:false,sum:false,pdf:true}))};
   const tf=$("#tplFile");tf.onchange=async()=>{const f=tf.files[0];if(!f)return;pull();
-    try{const buf=await f.arrayBuffer();const wb=new ExcelJS.Workbook();await wb.xlsx.load(buf);E.sheets=C.readTemplate(wb);p.template=ab2b64(buf);p.templateName=f.name;
+    try{const T=await openTemplate(f);const buf=T.buf,wb=T.wb;E.sheets=C.readTemplate(wb);p.template=ab2b64(buf);p.templateName=T.name;
+      if(T.converted)toast(`"${f.name}" was converted to .xlsx so it can be filled. Colours or logos may be simpler — for the exact look, open it in Excel, Save As .xlsx and upload that.`);
       const sh=E.sheets[0];p.sheet=sh.name;p.headerRow=C.detectHeaderRow(sh.rows)+1;p.dataStartRow=p.headerRow+1;rebuildCols();
       if(p.kind==="kpi"){const lr=await learnProfile(p,true,wb);const leg=findLegend(sh,p.headerRow);if(leg)p.legendRow=leg;toast(lr.explainSheet?`Rules read from "${lr.explainSheet}"${lr.exampleSheet?` and "${lr.exampleSheet}"`:""}`:"No explanation sheet found — set the columns by hand")}
       if(p.kind!=="kpi"&&p.sourceFields&&p.sourceFields.length)autoMapAll(false);render()}
-    catch(e){console.error(e);toast("Could not read the template. It must be an .xlsx file (not .xls).")}};
+    catch(e){console.error(e);toast("Could not read the template ("+(e.message||e)+"). Open it in Excel, Save As .xlsx and upload it again.")}};
   if($("#e_sheet")){
     $("#e_sheet").onchange=()=>{pull();const sh=E.sheets.find(s=>s.name===p.sheet);p.headerRow=C.detectHeaderRow(sh.rows)+1;p.dataStartRow=p.headerRow+1;rebuildCols();render()};
     $("#e_hr").onchange=()=>{const old=p.dataStartRow;const oh=p.headerRow;pull();if(p.dataStartRow===old&&old===oh+1)p.dataStartRow=p.headerRow+1;rebuildCols();render()};
